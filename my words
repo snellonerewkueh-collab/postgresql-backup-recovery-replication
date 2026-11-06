@@ -1,0 +1,398 @@
+# PostgreSQL Database Backup, Recovery and Streaming Replication
+
+## Practical Assignment – PostgreSQL 17
+
+**Operating System:** Windows 11 Pro
+**Database Management System:** PostgreSQL 17.11
+**Primary Database:** `recovery_lab`
+**Primary Server Port:** `5432`
+**Standby Server Port:** `5434`
+
+---
+
+## Introduction
+
+This practical assignment demonstrates PostgreSQL database administration techniques, including logical backups, WAL archiving, physical base backups, Point-in-Time Recovery (PITR), streaming replication, and replication monitoring.
+
+The practical exercises were completed using PostgreSQL 17 on Windows 11.
+
+## Step 1: Take and Verify a Logical Backup
+
+### Objective
+
+Create a logical backup of the `bootcamp` database and verify that it can be restored successfully.
+
+### Backup command
+
+```powershell
+& "C:\Program Files\PostgreSQL\17\bin\pg_dump.exe" `
+-U postgres -h localhost -p 5432 `
+-Fc -f "C:\Users\snell\backups\bootcamp.dump" bootcamp
+```
+
+The backup was created in custom archive format.
+
+### Verify the backup
+
+```powershell
+& "C:\Program Files\PostgreSQL\17\bin\pg_restore.exe" `
+--list "C:\Users\snell\backups\bootcamp.dump"
+```
+
+### Additional restoration test
+
+The `bootcamp` database contained no user-created objects. Therefore, the populated `recovery_lab` database was also used for a meaningful backup and restoration test.
+
+```powershell
+& "C:\Program Files\PostgreSQL\17\bin\pg_dump.exe" `
+-U postgres -h localhost -p 5432 `
+-Fc -f "C:\Users\snell\backups\recovery_lab.dump" recovery_lab
+```
+
+The backup was restored into `recovery_lab_restore_test` using `pg_restore`.
+
+The restoration was successful, and the `students` table contained three records.
+
+**Result:** Logical backup and restoration successfully demonstrated.
+
+## Step 2: Enable WAL Archiving
+
+### Objective
+
+Configure PostgreSQL to archive Write-Ahead Log (WAL) files and create a physical base backup.
+
+### PostgreSQL configuration
+
+File:
+
+`C:\Program Files\PostgreSQL\17\data\postgresql.conf`
+
+The following settings were configured:
+
+```ini
+listen_addresses = 'localhost'
+port = 5432
+wal_level = replica
+max_wal_senders = 10
+max_replication_slots = 10
+archive_mode = on
+archive_command = 'copy /Y "%p" "C:/PostgreSQL/wal_archive/%f" >NUL'
+```
+
+The WAL archive directory was created at:
+
+`C:\PostgreSQL\wal_archive`
+
+The PostgreSQL service was restarted to apply the configuration.
+
+### Check WAL archiving status
+
+```sql
+SELECT * FROM pg_stat_archiver;
+```
+
+Observed results:
+
+- Archived WAL segments: 5
+- Failed archive operations: 0
+- WAL archiving: Enabled
+
+### Create a physical base backup
+
+```powershell
+& "C:\Program Files\PostgreSQL\17\bin\pg_basebackup.exe" `
+-U postgres -h localhost -p 5432 `
+-D "C:\PostgreSQL\pitr_base" `
+-Fp -Xs -P -w
+```
+
+### Verify the base backup
+
+```powershell
+& "C:\Program Files\PostgreSQL\17\bin\pg_verifybackup.exe" `
+"C:\PostgreSQL\pitr_base"
+```
+
+Output:
+
+```text
+backup successfully verified
+```
+
+**Result:** WAL archiving and physical base backup successfully completed and verified.
+
+## Step 3: Simulate a Disaster and Recover
+
+### Objective
+
+Demonstrate Point-in-Time Recovery (PITR) using a PostgreSQL restore point.
+
+Instead of deleting the original student records, a separate recovery test was performed to protect the existing database.
+
+### Create a named restore point
+
+```sql
+SELECT pg_create_restore_point('before_pitr_test');
+```
+
+The returned restore point LSN was:
+
+```text
+0/50000C8
+```
+
+### Create a test table after the restore point
+
+```sql
+CREATE TABLE pitr_marker (
+    id integer PRIMARY KEY,
+    note text
+);
+
+INSERT INTO pitr_marker
+VALUES (1, 'Created after the restore point');
+```
+
+### Prepare the recovery configuration
+
+A separate recovery directory was created:
+
+`C:\PostgreSQL\pitr_test`
+
+The recovery configuration included:
+
+```ini
+port = 5433
+listen_addresses = '127.0.0.1'
+archive_mode = off
+archive_command = ''
+restore_command = 'copy /Y "C:/PostgreSQL/wal_archive/%f" "%p" >NUL'
+recovery_target_name = 'before_pitr_test'
+recovery_target_action = 'pause'
+```
+
+A `recovery.signal` file was created in the recovery data directory.
+
+The recovery server was started separately from the original PostgreSQL server.
+
+### Verify recovery
+
+```sql
+SELECT
+    current_database(),
+    pg_is_in_recovery(),
+    current_setting('port'),
+    to_regclass('public.pitr_marker'),
+    (SELECT count(*) FROM public.students) AS student_count;
+```
+
+Observed results:
+
+| Verification                   | Result       |
+| ------------------------------ | ------------ |
+| Database                       | recovery_lab |
+| Recovery status                | true         |
+| Recovery port                  | 5433         |
+| Test table after restore point | Absent       |
+| Original student records       | 3            |
+
+The test table was absent because recovery stopped at the named restore point created before the table.
+
+**Result:** Point-in-Time Recovery successfully demonstrated using a named restore point.
+
+*Note: The practical demonstrated recovery to a named restore point rather than the timestamp-based DELETE exercise in the original instructions.*
+
+## Step 4: Set Up a Streaming Standby
+
+### Objective
+
+Create a replication user and configure a standby PostgreSQL server using `pg_basebackup`.
+
+### Create the replication role
+
+On the primary database:
+
+```sql
+CREATE ROLE replicator WITH REPLICATION LOGIN;
+```
+
+A password was configured securely using the PostgreSQL `\password` command.
+
+### Configure replication access
+
+File:
+
+`C:\Program Files\PostgreSQL\17\data\pg_hba.conf`
+
+The existing localhost replication rule was:
+
+```ini
+host replication all 127.0.0.1/32 scram-sha-256
+```
+
+This allowed the replication account to connect locally using SCRAM authentication.
+
+### Create the standby backup
+
+```powershell
+& "C:\Program Files\PostgreSQL\17\bin\pg_basebackup.exe" `
+-h localhost -p 5432 -U replicator `
+-D "C:\PostgreSQL\standby" `
+-Fp -Xs -P -R -W
+```
+
+The backup completed successfully at 100%.
+
+The following file was verified:
+
+```text
+C:\PostgreSQL\standby\standby.signal
+```
+
+### Configure the standby server
+
+The standby was configured to run on port `5434`.
+
+Its connection settings included:
+
+```ini
+primary_conninfo = 'user=replicator host=localhost port=5432'
+port = 5434
+listen_addresses = '127.0.0.1'
+archive_mode = off
+archive_command = ''
+```
+
+The replication password was stored separately in a PostgreSQL password file and was not included in this repository.
+
+### Start the standby server
+
+```powershell
+& "C:\Program Files\PostgreSQL\17\bin\pg_ctl.exe" `
+-D "C:\PostgreSQL\standby" `
+-l "C:\PostgreSQL\standby_server.log" `
+-w start
+```
+
+The server started successfully.
+
+### Verify standby recovery status
+
+```sql
+SELECT pg_is_in_recovery(), current_setting('port');
+```
+
+Observed result:
+
+| Parameter           | Result |
+| ------------------- | ------ |
+| pg_is_in_recovery() | true   |
+| Port                | 5434   |
+
+**Result:** Streaming standby successfully configured and started.
+
+## Step 5: Watch Replication Health
+
+### Objective
+
+Monitor replication status and measure replication lag from the primary PostgreSQL server.
+
+### Monitoring query
+
+```sql
+SELECT
+    application_name,
+    client_addr,
+    state,
+    sync_state,
+    sent_lsn,
+    replay_lsn,
+    pg_wal_lsn_diff(sent_lsn, replay_lsn) AS lag_bytes
+FROM pg_stat_replication;
+```
+
+### Observed results
+
+| Parameter            | Observed result |
+| -------------------- | --------------- |
+| Application name     | walreceiver     |
+| Client address       | ::1             |
+| Replication state    | streaming       |
+| Synchronization mode | async           |
+| Sent LSN             | 0/8000DA8       |
+| Replay LSN           | 0/8000DA8       |
+| Replication lag      | 0 bytes         |
+
+The matching sent and replay LSN values showed that the standby had replayed the WAL data up to the reported position at the time of monitoring.
+
+**Result:** Replication monitoring successfully demonstrated with zero reported lag.
+
+## Final Streaming Replication Test
+
+To confirm that the primary and standby servers were communicating correctly, a test table was created on the primary server.
+
+```sql
+CREATE TABLE replication_demo (
+    id integer PRIMARY KEY,
+    note text
+);
+
+INSERT INTO replication_demo
+VALUES (1, 'Streaming replication successful');
+```
+
+The standby server was then queried:
+
+```sql
+SELECT * FROM replication_demo;
+```
+
+### Output from the standby
+
+```text
+ id |               note
+----+----------------------------------
+  1 | Streaming replication successful
+(1 row)
+```
+
+This confirmed that data inserted into the primary database was successfully replicated to the standby database.
+
+---
+
+## Conclusion
+
+The PostgreSQL database backup, recovery, and streaming replication practical assignment was successfully demonstrated.
+
+The practical exercises covered:
+
+1. Creating and restoring logical database backups.
+2. Enabling and monitoring WAL archiving.
+3. Creating and verifying physical base backups.
+4. Performing Point-in-Time Recovery using a named restore point.
+5. Creating a replication user and configuring a standby server.
+6. Monitoring replication health and replication lag.
+7. Testing data synchronization between primary and standby servers.
+
+The final replication test confirmed that records created on the primary server were available on the standby server.
+
+This practical assignment improved my understanding of PostgreSQL database administration, database protection, disaster recovery, and high availability.
+
+**Overall Status: Successfully Demonstrated.**
+
+## Screenshots and Evidence
+
+The following screenshots can be added to the repository to document the practical results:
+
+- [ ] Logical database backup and restoration.
+- [ ] WAL archiving status.
+- [ ] Successful base backup verification.
+- [ ] Point-in-Time Recovery verification.
+- [ ] Standby server running on port 5434.
+- [ ] Replication monitoring showing streaming and zero lag.
+- [ ] Final replicated table result.
+
+## Security Note
+
+Database passwords, PostgreSQL password files, private database backups, and sensitive database records must not be uploaded to a public GitHub repository.
+
